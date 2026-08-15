@@ -6,20 +6,80 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CLI-Anything-Web is a Claude Code plugin that generates production-grade Python CLIs for any web application by capturing live HTTP traffic. Point at a URL → capture API traffic via playwright-cli → analyze endpoints → generate a complete CLI with auth, REPL mode, `--json` output, and tests.
 
-## Plugin Structure
+## Repository Layout
+
+This repo is a monorepo: the Claude Code plugin that *generates* CLIs, plus
+the 20 generated CLIs themselves, plus fleet-wide tooling that keeps all of
+it consistent, versioned, and published.
 
 ```
 cli-anything-web-plugin/          # The plugin itself
 ├── .claude-plugin/plugin.json    # Plugin manifest
 ├── HARNESS.md                    # Core methodology SOP (read this first)
-├── commands/                     # Slash commands (/cli-anything-web, /record, /refine, etc.)
+├── commands/                     # Slash commands (/cli-anything-web, /record, /refine, /test, /validate, /list)
+├── agents/                       # 4 review agents (see Phase 4 below): traffic-fidelity-reviewer,
+│                                 #   harness-compliance-reviewer, output-ux-reviewer, cross-cli-consistency-checker
 ├── skills/                       # 4-phase skill system (capture → methodology → testing → standards)
-├── scripts/                      # parse-trace.py, mitmproxy-capture.py, analyze-traffic.py (v1.3.0), site-fingerprint.js, capture-checkpoint.py, phase-state.py, repl_skin.py
-│                                 # Pipeline automation: scaffold-cli.py, validate-checklist.py, generate-test-docs.py, smoke-test.py
-└── templates/                    # .tpl files used by scaffold-cli.py (exceptions, client, auth, CLI entry, setup, RPC, etc.)
+│                                 #   + boilerplate (scaffold-cli.py template contract, non-invocable)
+│                                 #   + gap-analyzer (endpoint coverage diff; mandatory first step of /refine)
+│                                 #   + shared/ (CONVENTIONS.md, RECOVERY.md — cross-phase reference)
+├── scripts/                      # parse-trace.py, mitmproxy-capture.py, analyze-traffic.py, site-fingerprint.js,
+│                                 #   capture-checkpoint.py, phase-state.py, scaffold-cli.py, validate-checklist.py,
+│                                 #   generate-test-docs.py, smoke-test.py (+ scripts/tests/)
+├── templates/                    # .tpl files used by scaffold-cli.py (exceptions, client, auth, CLI entry, setup, RPC, etc.)
+└── verify-plugin.sh              # Validates the plugin's own manifest/structure
+
+<app>/agent-harness/              # One directory per generated CLI, at repo root (see Generated CLIs table)
+cli-web-core/                     # cli_web_core: canonical shared runtime (see "Shared runtime" below)
+devkit/                           # cli_web_devkit: fleet tooling package (see "Fleet tooling" below)
+meta/                             # cli-anything-web: umbrella PyPI package depending on all 20 cli-web-* CLIs
+registry.json                     # Machine-readable fleet index — the source of truth devkit validates against
+docs/                             # PUBLISHING.md (release/PyPI trigger notes), registry/index.html (generated)
+tests/contract/                   # Fleet-wide offline contract tests (see "Fleet contract tests" below)
+scripts/test-all.sh               # Root-level: runs test_core.py for every generated CLI, one by one
+pyproject.toml                    # Monorepo-wide ruff/pytest/coverage/mypy config (see Commands)
+.github/workflows/                # tests.yml, contract.yml, canary.yml, publish.yml, release-please.yml, about-sync.yml
+.claude/skills/                   # One usage skill per generated CLI (e.g. futbin-cli, linkedin-cli) + sync-check
 ```
 
 Generated CLIs live in their own directories (e.g., `futbin/agent-harness/`) with namespace packages under `cli_web/`.
+
+### Shared runtime (`cli-web-core`)
+
+`cli_web_core` (PyPI `cli-web-core`, zero hard deps) is the **canonical
+source** for modules every generated CLI needs: `exceptions.py`,
+`output.py`, `repl_skin.py`, `doctor.py`, `polling.py`, `mcp_server.py`, and
+`testing/` (`contract.py`, `fixtures.py`). Generated CLIs do **not** depend
+on this package at install time — they **vendor byte-identical copies** of
+these files under their own `utils/` (e.g.
+`capitoltrades/agent-harness/cli_web/capitoltrades/utils/repl_skin.py`).
+This is deliberate ("vendoring with provenance", see `devkit/cli_web_devkit/sync.py`):
+each CLI stays a single, dependency-light package. `devkit`'s `SHARED_FILES`
+map (`sync.py`) tracks canon → vendored path per file; `cli-web-devkit drift`
+(run in `contract.yml` CI) fails if a vendored copy has diverged from its
+canon source without a recorded override, and `cli-web-devkit resync`
+rewrites vendored copies from canon. When editing one of these shared
+modules, edit the canon copy in `cli-web-core/cli_web_core/` and resync —
+don't hand-edit a CLI's vendored copy directly unless deliberately overriding.
+
+### Fleet tooling (`devkit`)
+
+`cli_web_devkit` (PyPI `cli-web-devkit`, stdlib-only) is the `cli-web-devkit`
+CLI (`python -m cli_web_devkit ...` or the installed entry point) used in CI
+and pre-commit to keep the fleet consistent:
+
+```bash
+cli-web-devkit registry validate   # validate registry.json against the actual fleet on disk
+cli-web-devkit matrix               # emit the per-CLI test matrix (drives tests.yml's `test` job)
+cli-web-devkit docs [--check]       # (re)generate README.md's fleet sections from registry.json
+cli-web-devkit about [--check|--apply]  # sync the GitHub repo "About" description's CLI count
+cli-web-devkit drift                 # check vendored shared files against cli-web-core canon
+cli-web-devkit resync                # rewrite vendored shared files from cli-web-core canon
+```
+
+Adding, removing, or renaming a CLI means updating `registry.json` and
+re-running these gates — `registry.json` (not directory listing) is what CI,
+the canary workflow, and the About-description sync all read from.
 
 ## Pipeline Phases
 
